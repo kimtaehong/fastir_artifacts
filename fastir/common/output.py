@@ -4,9 +4,14 @@ import json
 import logging
 import zipfile
 import platform
+import jsonlines
+import pywintypes
+import win32file
+import win32timezone
 from datetime import datetime
 from collections import defaultdict
 
+from .file_info import FileInfo
 from .logging import logger, PROGRESS
 
 
@@ -36,16 +41,19 @@ def normalize_filepath(filepath):
 
 
 class Outputs:
-    def __init__(self, dirpath, maxsize, sha256):
+    def __init__(self, dirpath, maxsize, sha256, compress):
         self._dirpath = dirpath
 
         self._zip = None
         self._maxsize = parse_human_size(maxsize)
         self._sha256 = sha256
+        self._compress = compress
 
         self._commands = defaultdict(dict)
         self._wmi = defaultdict(dict)
         self._registry = defaultdict(lambda: defaultdict(dict))
+
+        self._file_info = None
 
         self._init_output_()
 
@@ -78,10 +86,72 @@ class Outputs:
         logger.addHandler(file_output)
         logger.addHandler(console_output)
 
+    def add_collected_file_info(self, artifact, path_object):
+        info = FileInfo(path_object)
+
+        if not self._maxsize or info.size <= self._maxsize:
+            # Open the result file if this is the first time it is needed
+            if self._file_info is None:
+                self._file_info = jsonlines.open(
+                    os.path.join(self._dirpath, f'{self._hostname}-file_info.jsonl'), 'w')
+
+            file_info = info.compute()
+            file_info['labels'] = {'artifact': artifact}
+
+            self._file_info.write(file_info)
+
     def add_collected_file(self, artifact, path_object):
         logger.info(f"Collecting file '{path_object.path}' for artifact '{artifact}'")
 
         # Make sure to create the file if it do not exists
+        if self._compress:
+            self.add_collected_file_using_zip_file(artifact, path_object)
+        else:
+            if not self._maxsize or path_object.get_size() <= self._maxsize:
+                if self._sha256:
+                    h = hashlib.sha256()
+                out_file = os.path.join(self._dirpath, path_object.name)
+                handle = win32file.CreateFileW(
+                    out_file,
+                    win32file.GENERIC_READ | win32file.GENERIC_WRITE,
+                    win32file.FILE_SHARE_READ | win32file.FILE_SHARE_WRITE,
+                    None,
+                    win32file.CREATE_ALWAYS,
+                    win32file.FILE_ATTRIBUTE_NORMAL,
+                    None
+                )
+                if not handle:
+                    logger.error('CreateFileW failed. path={}'.format(out_file))
+                    return
+                for chunk in path_object.read_chunks():
+                    win32file.WriteFile(handle, chunk)
+                    if self._sha256:
+                        h.update(chunk)
+
+                try:
+                    ctime = pywintypes.Time(datetime.fromtimestamp(path_object.obj.info.meta.ctime))
+                    atime = pywintypes.Time(datetime.fromtimestamp(path_object.obj.info.meta.atime))
+                    mtime = pywintypes.Time(datetime.fromtimestamp(path_object.obj.info.meta.mtime))
+
+                    win32file.SetFileTime(
+                        handle,
+                        ctime,
+                        atime,
+                        mtime
+                    )
+                except Exception as ex:
+                    logging.error('setFileTime() failed. res={}'.format(str(ex)))
+                win32file.CloseHandle(handle)
+
+                if self._sha256:
+                    logger.info(f"File '{path_object.path}' has SHA-256 '{h.hexdigest()}'")
+            else:
+                logger.warning(f"Ignoring file '{path_object.path}' because of its size")
+
+    def unix_timestamp_to_filetime(self, unix_timestamp):
+        return int((unix_timestamp * 10000000) + 116444736000000000)
+
+    def add_collected_file_using_zip_file(self, artifact, path_object):
         if self._zip is None:
             self._zip = zipfile.ZipFile(
                 os.path.join(self._dirpath, f'{self._hostname}-files.zip'), 'w', zipfile.ZIP_DEFLATED)
@@ -138,6 +208,9 @@ class Outputs:
         if self._registry:
             with open(os.path.join(self._dirpath, f'{self._hostname}-registry.json'), 'w') as out:
                 json.dump(self._registry, out, indent=2)
+
+        if self._file_info:
+            self._file_info.close()
 
         for handler in logger.handlers[:]:
             handler.close()

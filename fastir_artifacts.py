@@ -94,7 +94,7 @@ def main(arguments):
         locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
     except locale.Error:
         pass
-    output = Outputs(arguments.output, arguments.maxsize, arguments.sha256)
+    output = Outputs(arguments.output, arguments.maxsize, arguments.sha256, arguments.compress)
 
     logger.log(PROGRESS, "Loading artifacts ...")
 
@@ -117,7 +117,12 @@ def main(arguments):
 
 if __name__ == "__main__":
     parser = configargparse.ArgumentParser(
-        default_config_files=[os.path.join((os.path.dirname(__file__), os.path.dirname(sys.executable))[hasattr(sys, 'frozen')], 'fastir_artifacts.ini')],
+        default_config_files=[
+            os.path.join(
+                (os.path.dirname(__file__), os.path.dirname(sys.executable))[hasattr(sys, 'frozen')],
+                'fastir_artifacts.ini'
+            )
+        ],
         description='FastIR Artifacts - Collect ForensicArtifacts')
 
     parser.add_argument('-i', '--include', help='Artifacts to collect (comma-separated)')
@@ -130,5 +135,6 @@ if __name__ == "__main__":
     parser.add_argument('-m', '--maxsize', help='Do not collect file with size > n')
     parser.add_argument('-o', '--output', help='Directory where the results are created', default='.')
     parser.add_argument('-s', '--sha256', help='Compute SHA-256 of collected files', action='store_true')
+    parser.add_argument('-c', '--compress', help='Compress the collection results', action='store_true')
 
     main(parser.parse_args())
